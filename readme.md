@@ -244,4 +244,13 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-**⚠️ Disclaimer**: Always ensure you have permission to scan systems. This tool is for legitimate security auditing and hardening purposes only.
+**⚠️ Disclaimer**: Always ensure you have permission to scan systems. This tool is for legitimate security auditing and hardening 
+
+# Doe monero para nos ajudar: (donate XMR)
+´´´bash
+    87JGuuwXzoMGwQAcSD7cvS7D7iacPpN2f5bVqETbUvCgdEmrPZa12gh5DSiKKRgdU7c5n5x1UvZLj8PQ7AAJSso5CQxgjak
+´´´ 
+
+'Página oficial de segurança digital:'
+
+https://traderprofissional.com.br/seguranca-digital.aspxpurposes only.
