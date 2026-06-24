@@ -42,7 +42,12 @@ cd trivy-menu
 chmod +x trivy-menu.sh
 
 # Run the menu
-./trivy-menu.sh
+./trivy-menu
+
+# Use in any location in terminal
+sudo cp -ra trivy-menu /usr/local/bin
+#to run
+trivy-menu
 ```
 
 ## 📋 Menu Options
