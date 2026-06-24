@@ -1,0 +1,639 @@
+#!/bin/bash
+
+# ============================================================
+# SCRIPT: trivy-menu
+# DESCRIPTION: Interactive menu to manage and execute Trivy
+# ============================================================
+
+# Colors for better visualization
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'      # Azul claro (ciano)
+WHITE='\033[1;37m'
+NC='\033[0m'           # No Color
+
+# Cache file for version check
+VERSION_CACHE="/tmp/trivy_version_cache"
+CACHE_TTL=3600  # 1 hour in seconds
+
+# Database cache directory
+DB_CACHE_DIR="$HOME/.cache/trivy/db"
+DB_FILE="$DB_CACHE_DIR/trivy.db"
+METADATA_FILE="$DB_CACHE_DIR/metadata.json"
+
+# ============================================================
+# FUNCTIONS
+# ============================================================
+
+# Function to print header
+print_header() {
+    clear
+    echo -e "${CYAN}============================================${NC}"
+    echo -e "${CYAN}        TRIVY MENU - OFFLINE SCAN         ${NC}"
+    echo -e "${CYAN}============================================${NC}"
+    echo ""
+}
+
+# Function to check if database exists
+check_database_exists() {
+    if [ -f "$DB_FILE" ] && [ -f "$METADATA_FILE" ]; then
+        local db_size=$(stat -c%s "$DB_FILE" 2>/dev/null || stat -f%z "$DB_FILE" 2>/dev/null)
+        if [ -n "$db_size" ] && [ "$db_size" -gt 100000000 ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Function to check Trivy version
+check_trivy_version() {
+    if ! command -v trivy &> /dev/null; then
+        echo "NOT_INSTALLED"
+        return 0
+    fi
+    
+    # Get current version from trivy command
+    local trivy_output=$(trivy --version 2>/dev/null | head -n1)
+    local current_version=$(echo "$trivy_output" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    
+    # If version not found, try dpkg
+    if [ -z "$current_version" ]; then
+        current_version=$(dpkg -l trivy 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    fi
+    
+    if [ -z "$current_version" ]; then
+        echo "UNKNOWN:$trivy_output"
+        return 1
+    fi
+    
+    # Check cache for latest version
+    local latest_version=""
+    local use_cache=false
+    if [ -f "$VERSION_CACHE" ]; then
+        local cache_age=$(($(date +%s) - $(stat -c %Y "$VERSION_CACHE" 2>/dev/null || stat -f %m "$VERSION_CACHE" 2>/dev/null)))
+        if [ "$cache_age" -lt "$CACHE_TTL" ]; then
+            use_cache=true
+        fi
+    fi
+    
+    if [ "$use_cache" = true ]; then
+        latest_version=$(cat "$VERSION_CACHE")
+    else
+        latest_version=$(curl -s https://api.github.com/repos/aquasecurity/trivy/releases/latest \
+            | grep -oP '"tag_name":\s*"\K[^"]+' 2>/dev/null | sed 's/^v//')
+        if [ -n "$latest_version" ]; then
+            echo "$latest_version" > "$VERSION_CACHE"
+        fi
+    fi
+    
+    if [ -z "$latest_version" ]; then
+        echo "ERROR"
+        return 1
+    fi
+    
+    # Compare versions
+    if [ "$current_version" = "$latest_version" ]; then
+        echo "UPDATED:$current_version"
+        return 0
+    else
+        echo "UPDATE_AVAILABLE:$current_version->$latest_version"
+        return 1
+    fi
+}
+
+# ============================================================
+# SHA256 FUNCTIONS
+# ============================================================
+
+# Function to calculate SHA256 of a file
+calculate_sha256() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        sha256sum "$file" | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+# Function to show SHA256 and ask for confirmation
+verify_and_confirm_sha256() {
+    local file="$1"
+    local file_name="$2"
+    
+    if [ ! -f "$file" ]; then
+        echo -e "${RED}✗ File not found: $file${NC}"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}▶ Calculating SHA256 checksum...${NC}"
+    local file_hash=$(calculate_sha256 "$file")
+    
+    if [ -z "$file_hash" ]; then
+        echo -e "${RED}✗ Failed to calculate SHA256${NC}"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${WHITE}┌─────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${WHITE}│  SHA256 of ${file_name}:${NC}"
+    echo -e "${WHITE}│  ${GREEN}$file_hash${NC}"
+    echo -e "${WHITE}└─────────────────────────────────────────────────────────┘${NC}"
+    echo ""
+    
+    read -p "Do you want to continue with the installation? [Y/n]: " confirm
+    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+        echo -e "${YELLOW}⚠ Installation cancelled by user${NC}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Function to calculate and show SHA256 for database
+show_db_sha256() {
+    local file="$1"
+    
+    if [ ! -f "$file" ]; then
+        echo -e "${RED}✗ File not found: $file${NC}"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}▶ Calculating SHA256 checksum for database...${NC}"
+    local file_hash=$(calculate_sha256 "$file")
+    
+    if [ -z "$file_hash" ]; then
+        echo -e "${RED}✗ Failed to calculate SHA256${NC}"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${WHITE}┌─────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${WHITE}│  SHA256 of db.tar.gz:${NC}"
+    echo -e "${WHITE}│  ${GREEN}$file_hash${NC}"
+    echo -e "${WHITE}└─────────────────────────────────────────────────────────┘${NC}"
+    echo ""
+    
+    read -p "Do you want to continue with the database extraction? [Y/n]: " confirm
+    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+        echo -e "${YELLOW}⚠ Extraction cancelled by user${NC}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# ============================================================
+# INSTALLATION FUNCTIONS
+# ============================================================
+
+# Function to install Trivy
+install_trivy() {
+    echo -e "${CYAN}▶ Installing/Updating Trivy...${NC}"
+    
+    # Get the download URL for the .deb package
+    echo -e "${YELLOW}▶ Fetching download URL...${NC}"
+    local download_url=$(curl -sL https://api.github.com/repos/aquasecurity/trivy/releases/latest \
+        | grep -E "browser_download_url.*Linux-64bit.deb" \
+        | head -1 \
+        | cut -d '"' -f 4)
+    
+    if [ -z "$download_url" ]; then
+        echo -e "${RED}✗ Failed to get download URL${NC}"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}▶ Downloading from: $download_url${NC}"
+    
+    # Download with -L to follow redirects
+    curl -L -o /tmp/trivy_latest.deb "$download_url" --progress-bar
+    
+    # Check if download was successful and file is valid
+    if [ ! -f "/tmp/trivy_latest.deb" ]; then
+        echo -e "${RED}✗ Download failed - file not created${NC}"
+        return 1
+    fi
+    
+    # Verify it's a valid deb package
+    if ! file /tmp/trivy_latest.deb | grep -q "Debian binary package"; then
+        echo -e "${RED}✗ Downloaded file is not a valid Debian package${NC}"
+        echo -e "${YELLOW}File type: $(file /tmp/trivy_latest.deb)${NC}"
+        rm -f /tmp/trivy_latest.deb
+        return 1
+    fi
+    
+    # Get file size for verification
+    local file_size=$(stat -c%s /tmp/trivy_latest.deb 2>/dev/null || stat -f%z /tmp/trivy_latest.deb 2>/dev/null)
+    if [ "$file_size" -lt 1000000 ]; then  # Less than 1MB is probably invalid
+        echo -e "${RED}✗ Downloaded file is too small ($file_size bytes) - probably invalid${NC}"
+        rm -f /tmp/trivy_latest.deb
+        return 1
+    fi
+    
+    # ============================================================
+    # SHA256 CHECK - Show hash and ask if user wants to continue
+    # ============================================================
+    if ! verify_and_confirm_sha256 "/tmp/trivy_latest.deb" "trivy_latest.deb"; then
+        rm -f /tmp/trivy_latest.deb
+        return 1
+    fi
+    
+    # Install
+    echo -e "${YELLOW}▶ Installing... (sudo required)${NC}"
+    sudo dpkg -i /tmp/trivy_latest.deb 2>/tmp/dpkg_error.log
+    
+    # Fix dependencies if needed
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}⚠ Fixing dependencies...${NC}"
+        sudo apt-get install -f -y
+        sudo dpkg -i /tmp/trivy_latest.deb
+    fi
+    
+    # Cleanup
+    rm -f /tmp/trivy_latest.deb
+    
+    # Verify installation
+    if command -v trivy &> /dev/null; then
+        local installed_version=$(trivy --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        echo -e "${GREEN}✓ Trivy installed successfully!${NC}"
+        echo -e "${GREEN}✓ Version: $installed_version${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ Installation failed${NC}"
+        if [ -f /tmp/dpkg_error.log ]; then
+            echo -e "${YELLOW}Error details:${NC}"
+            cat /tmp/dpkg_error.log
+            rm -f /tmp/dpkg_error.log
+        fi
+        return 1
+    fi
+}
+
+# Function to install ORAS
+install_oras() {
+    echo -e "${CYAN}▶ Installing ORAS...${NC}"
+    VERSION="1.0.0"
+    
+    # Check if already installed
+    if command -v oras &> /dev/null; then
+        echo -e "${GREEN}✓ ORAS is already installed: $(oras version | head -n1)${NC}"
+        return 0
+    fi
+    
+    echo -e "${YELLOW}▶ Downloading ORAS...${NC}"
+    curl -LO "https://github.com/oras-project/oras/releases/download/v${VERSION}/oras_${VERSION}_linux_amd64.tar.gz"
+    
+    if [ ! -f "oras_${VERSION}_linux_amd64.tar.gz" ]; then
+        echo -e "${RED}✗ Download failed${NC}"
+        return 1
+    fi
+    
+    # ============================================================
+    # SHA256 CHECK for ORAS
+    # ============================================================
+    if ! verify_and_confirm_sha256 "oras_${VERSION}_linux_amd64.tar.gz" "oras_${VERSION}_linux_amd64.tar.gz"; then
+        rm -f "oras_${VERSION}_linux_amd64.tar.gz"
+        return 1
+    fi
+    
+    mkdir -p oras-install/
+    tar -zxf oras_${VERSION}_*.tar.gz -C oras-install/
+    sudo mv oras-install/oras /usr/local/bin/
+    rm -rf oras_${VERSION}_*.tar.gz oras-install/
+    
+    # Verify installation
+    if command -v oras &> /dev/null; then
+        echo -e "${GREEN}✓ ORAS installed successfully!${NC}"
+        echo -e "${GREEN}✓ Version: $(oras version | head -n1)${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ Failed to install ORAS. Please check permissions.${NC}"
+        return 1
+    fi
+}
+
+# Function to update Trivy database
+update_trivy_db() {
+    echo -e "${CYAN}▶ Updating Trivy vulnerability database...${NC}"
+    
+    # Check if ORAS is installed
+    if ! command -v oras &> /dev/null; then
+        echo -e "${YELLOW}⚠ ORAS is not installed. Installing...${NC}"
+        install_oras
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}✗ ORAS installation failed. Cannot update database.${NC}"
+            return 1
+        fi
+    fi
+    
+    # Download database
+    echo -e "${YELLOW}▶ Downloading database from GHCR...${NC}"
+    oras pull ghcr.io/aquasecurity/trivy-db:2
+    
+    if [ $? -ne 0 ] || [ ! -f "db.tar.gz" ]; then
+        echo -e "${RED}✗ Failed to download database. Check network connection.${NC}"
+        return 1
+    fi
+    
+    # ============================================================
+    # SHA256 CHECK for database
+    # ============================================================
+    if ! show_db_sha256 "db.tar.gz"; then
+        rm -f "db.tar.gz"
+        return 1
+    fi
+    
+    # Create cache directory
+    mkdir -p "$DB_CACHE_DIR"
+    
+    # Extract database
+    echo -e "${YELLOW}▶ Extracting database to cache directory...${NC}"
+    tar -xvf db.tar.gz -C "$DB_CACHE_DIR"
+    
+    if [ $? -eq 0 ]; then
+        rm -rf db.tar.gz
+        echo -e "${GREEN}✓ Database updated successfully!${NC}"
+        echo -e "${GREEN}✓ Location: $DB_CACHE_DIR${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ Failed to extract database.${NC}"
+        return 1
+    fi
+}
+
+# Function to show scan examples
+show_examples() {
+    echo -e "${CYAN}============================================${NC}"
+    echo -e "${CYAN}          SCAN COMMAND EXAMPLES             ${NC}"
+    echo -e "${CYAN}============================================${NC}"
+    echo ""
+    echo -e "${YELLOW}Example 1 - Full system scan (HIGH,CRITICAL):${NC}"
+    echo -e "  ${GREEN}trivy fs --severity HIGH,CRITICAL --format table --output trivy-report-full.txt --skip-db-update /home${NC}"
+    echo ""
+    echo -e "${YELLOW}Example 2 - Root directory scan:${NC}"
+    echo -e "  ${GREEN}trivy fs --severity HIGH,CRITICAL --format table --output trivy-report-root.txt --skip-db-update /${NC}"
+    echo ""
+    echo -e "${YELLOW}Example 3 - Scan all severity levels:${NC}"
+    echo -e "  ${GREEN}trivy fs --format table --output trivy-report-all.txt --skip-db-update /home${NC}"
+    echo ""
+    echo -e "${YELLOW}Example 4 - JSON format for CI/CD integration:${NC}"
+    echo -e "  ${GREEN}trivy fs --severity HIGH,CRITICAL --format json --output trivy-report.json --skip-db-update /home${NC}"
+    echo ""
+    echo -e "${YELLOW}Example 5 - Scan with only CRITICAL severity:${NC}"
+    echo -e "  ${GREEN}trivy fs --severity CRITICAL --format table --output trivy-report-critical.txt --skip-db-update /home${NC}"
+    echo ""
+    echo -e "${YELLOW}Example 6 - Include misconfigurations and secrets:${NC}"
+    echo -e "  ${GREEN}trivy fs --scanners vuln,secret,misconfig --format table --output trivy-report-full.txt --skip-db-update /home${NC}"
+    echo ""
+    echo -e "${CYAN}============================================${NC}"
+}
+
+# Function to run custom scan
+run_custom_scan() {
+    echo -e "${CYAN}▶ Enter your custom Trivy scan command:${NC}"
+    echo -e "${YELLOW}  (Include --skip-db-update to use offline database)${NC}"
+    echo ""
+    read -p "Command: " user_command
+    
+    if [ -z "$user_command" ]; then
+        echo -e "${RED}✗ No command entered.${NC}"
+        return
+    fi
+    
+    # Check if command contains trivy
+    if [[ ! "$user_command" =~ ^trivy ]]; then
+        echo -e "${YELLOW}⚠ Command doesn't start with 'trivy'. Adding automatically...${NC}"
+        user_command="trivy $user_command"
+    fi
+    
+    # Check if --skip-db-update is present
+    if [[ ! "$user_command" =~ --skip-db-update ]]; then
+        echo -e "${YELLOW}⚠ Adding --skip-db-update flag...${NC}"
+        user_command="$user_command --skip-db-update"
+    fi
+    
+    echo -e "${CYAN}▶ Executing: ${GREEN}$user_command${NC}"
+    echo -e "${YELLOW}Press Ctrl+C to cancel...${NC}"
+    sleep 2
+    
+    echo ""
+    eval "$user_command"
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✓ Scan completed successfully!${NC}"
+    else
+        echo -e "${RED}✗ Scan failed with error code: $?${NC}"
+    fi
+}
+
+# Function to run quick scan
+run_quick_scan() {
+    echo -e "${CYAN}▶ QUICK SCAN OPTIONS:${NC}"
+    echo -e "  ${GREEN}1${NC}) Scan /home (HIGH,CRITICAL)"
+    echo -e "  ${GREEN}2${NC}) Scan / (HIGH,CRITICAL)"
+    echo -e "  ${GREEN}3${NC}) Scan /home (ALL severities)"
+    echo -e "  ${GREEN}4${NC}) Scan /home (CRITICAL only)"
+    echo -e "  ${GREEN}5${NC}) Scan /home (JSON format)"
+    echo -e "  ${GREEN}6${NC}) Custom command (same as Option 5)"
+    echo ""
+    read -p "Choose quick scan [1-6]: " quick_choice
+    
+    case $quick_choice in
+        1)
+            echo -e "${CYAN}▶ Running: trivy fs --severity HIGH,CRITICAL --format table --output trivy-report-home.txt --skip-db-update /home${NC}"
+            trivy fs --severity HIGH,CRITICAL --format table --output trivy-report-home.txt --skip-db-update /home
+            echo -e "${GREEN}✓ Report saved to: trivy-report-home.txt${NC}"
+            ;;
+        2)
+            echo -e "${CYAN}▶ Running: trivy fs --severity HIGH,CRITICAL --format table --output trivy-report-root.txt --skip-db-update /${NC}"
+            trivy fs --severity HIGH,CRITICAL --format table --output trivy-report-root.txt --skip-db-update /
+            echo -e "${GREEN}✓ Report saved to: trivy-report-root.txt${NC}"
+            ;;
+        3)
+            echo -e "${CYAN}▶ Running: trivy fs --format table --output trivy-report-all-severities.txt --skip-db-update /home${NC}"
+            trivy fs --format table --output trivy-report-all-severities.txt --skip-db-update /home
+            echo -e "${GREEN}✓ Report saved to: trivy-report-all-severities.txt${NC}"
+            ;;
+        4)
+            echo -e "${CYAN}▶ Running: trivy fs --severity CRITICAL --format table --output trivy-report-critical.txt --skip-db-update /home${NC}"
+            trivy fs --severity CRITICAL --format table --output trivy-report-critical.txt --skip-db-update /home
+            echo -e "${GREEN}✓ Report saved to: trivy-report-critical.txt${NC}"
+            ;;
+        5)
+            echo -e "${CYAN}▶ Running: trivy fs --severity HIGH,CRITICAL --format json --output trivy-report.json --skip-db-update /home${NC}"
+            trivy fs --severity HIGH,CRITICAL --format json --output trivy-report.json --skip-db-update /home
+            echo -e "${GREEN}✓ Report saved to: trivy-report.json${NC}"
+            ;;
+        6)
+            run_custom_scan
+            ;;
+        *)
+            echo -e "${RED}Invalid option.${NC}"
+            ;;
+    esac
+}
+
+# ============================================================
+# MAIN MENU
+# ============================================================
+
+main_menu() {
+    while true; do
+        print_header
+        
+        # Check and manage Trivy
+        local trivy_status=$(check_trivy_version)
+        
+        echo -e "${WHITE}▶ TRIVY STATUS:${NC}"
+        case "$trivy_status" in
+            NOT_INSTALLED)
+                echo -e "  ${RED}✗ Trivy is not installed${NC}"
+                read -p "  Do you want to install Trivy? [Y/n]: " install_choice
+                if [[ "$install_choice" != "n" ]]; then
+                    install_trivy
+                fi
+                ;;
+            UPDATED:*)
+                local version=${trivy_status#UPDATED:}
+                echo -e "  ${GREEN}✓ Trivy is up to date! (v$version)${NC}"
+                ;;
+            UPDATE_AVAILABLE:*)
+                local versions=${trivy_status#UPDATE_AVAILABLE:}
+                local current=${versions%->*}
+                local latest=${versions#*->}
+                echo -e "  ${YELLOW}⚠ Update available: v$current → v$latest${NC}"
+                read -p "  Do you want to update? [y/N]: " update_choice
+                if [[ "$update_choice" =~ ^[Yy]$ ]]; then
+                    install_trivy
+                fi
+                ;;
+            UNKNOWN:*)
+                local message=${trivy_status#UNKNOWN:}
+                echo -e "  ${YELLOW}⚠ Trivy is installed but version detection failed${NC}"
+                echo -e "  ${YELLOW}   Output: $message${NC}"
+                echo -e "  ${YELLOW}   Try reinstalling with option 1${NC}"
+                ;;
+            ERROR)
+                echo -e "  ${RED}✗ Failed to check version. Network issue?${NC}"
+                ;;
+        esac
+        
+        echo ""
+        
+        # Check ORAS
+        echo -e "${WHITE}▶ ORAS STATUS:${NC}"
+        if command -v oras &> /dev/null; then
+            echo -e "  ${GREEN}✓ ORAS is installed: $(oras version | head -n1)${NC}"
+        else
+            echo -e "  ${RED}✗ ORAS is not installed${NC}"
+            read -p "  Do you want to install ORAS? [Y/n]: " install_oras_choice
+            if [[ "$install_oras_choice" != "n" ]]; then
+                install_oras
+            fi
+        fi
+        
+        echo ""
+        
+        # Check Database
+        echo -e "${WHITE}▶ DATABASE STATUS:${NC}"
+        if check_database_exists; then
+            echo -e "  ${GREEN}✓ Database exists in cache${NC}"
+        else
+            echo -e "  ${RED}✗ Database not found${NC}"
+            read -p "  Do you want to download the database? [Y/n]: " db_choice
+            if [[ "$db_choice" != "n" ]]; then
+                update_trivy_db
+            fi
+        fi
+        
+        echo ""
+        echo -e "${CYAN}============================================${NC}"
+        echo -e "${WHITE}Available options:${NC}"
+        echo -e "  ${GREEN}1${NC}) Install/Update Trivy"
+        echo -e "  ${GREEN}2${NC}) Install ORAS"
+        echo -e "  ${GREEN}3${NC}) Update Trivy Database"
+        echo -e "  ${GREEN}4${NC}) Show scan command examples"
+        echo -e "  ${GREEN}5${NC}) Run custom scan command"
+        echo -e "  ${GREEN}6${NC}) Run quick scan (pre-defined)"
+        echo -e "  ${GREEN}7${NC}) Show versions and status"
+        echo -e "  ${GREEN}8${NC}) Exit"
+        echo ""
+        read -p "Choose an option [1-8]: " choice
+        
+        case $choice in
+            1)
+                echo ""
+                install_trivy
+                echo ""
+                read -p "Press Enter to continue..."
+                ;;
+            2)
+                echo ""
+                install_oras
+                echo ""
+                read -p "Press Enter to continue..."
+                ;;
+            3)
+                echo ""
+                update_trivy_db
+                echo ""
+                read -p "Press Enter to continue..."
+                ;;
+            4)
+                echo ""
+                show_examples
+                read -p "Press Enter to continue..."
+                ;;
+            5)
+                echo ""
+                run_custom_scan
+                echo ""
+                read -p "Press Enter to continue..."
+                ;;
+            6)
+                echo ""
+                run_quick_scan
+                echo ""
+                read -p "Press Enter to continue..."
+                ;;
+            7)
+                echo ""
+                echo -e "${WHITE}▶ VERSIONS AND STATUS:${NC}"
+                echo -e "  ${WHITE}Trivy:${NC}"
+                if command -v trivy &> /dev/null; then
+                    echo -e "    ${GREEN}$(trivy --version | head -n1)${NC}"
+                else
+                    echo -e "    ${RED}Not installed${NC}"
+                fi
+                echo -e "  ${WHITE}ORAS:${NC}"
+                if command -v oras &> /dev/null; then
+                    echo -e "    ${GREEN}$(oras version | head -n1)${NC}"
+                else
+                    echo -e "    ${RED}Not installed${NC}"
+                fi
+                echo -e "  ${WHITE}Database:${NC}"
+                if check_database_exists; then
+                    echo -e "    ${GREEN}Exists ($DB_FILE)${NC}"
+                else
+                    echo -e "    ${RED}Not found${NC}"
+                fi
+                echo ""
+                read -p "Press Enter to continue..."
+                ;;
+            8)
+                echo -e "${GREEN}Goodbye!${NC}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Invalid option. Please choose 1-8.${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# ============================================================
+# START SCRIPT
+# ============================================================
+
+main_menu
