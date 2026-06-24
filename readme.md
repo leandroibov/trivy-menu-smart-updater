@@ -237,9 +237,6 @@ Feel free to submit issues, fork the repository, and create pull requests!
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
-
-- [Aqua Security](https://aquasec.com/) for Trivy
-- [ORAS Project](https://oras.land/) for OCI registry tools
 - Open source community for making security accessible
 
 ---
